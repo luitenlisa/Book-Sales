@@ -1,0 +1,355 @@
+---
+title: "Case_Study_Script"
+output: html_document
+date: "2025-04-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Assignment
+Partition the data into training (60%) and validation (40%). Use seed = 1.
+
+```{r}
+
+# Load libraries
+library(dplyr)
+library(class)
+library(ggplot2)
+library(caret)
+
+getwd()
+# Load dataset
+cbc <- read.csv("CharlesBookClub.csv")
+
+# Partition dataset
+set.seed(1)
+split <- createDataPartition(cbc$Florence, p = 0.6, list = FALSE)
+train <- cbc[split, ]
+valid <- cbc[-split, ]
+
+#Training set: 2,400 customers
+#Validation set: 1,600 customers
+
+```
+
+
+1. What is the response rate for the training data customers taken as a whole? What is the response rate for each of the 4 × 5 × 3 = 60 combinations of RFM categories? Which combinations have response rates in the training data that are above the overall response in the training data?
+
+```{r}
+# Overall response rate
+overall_response_rate <- mean(train$Florence)
+#	Overall Response Rate (Training Set): 8.71%
+
+# Calculate RFM response rates
+rfm_rates <- train %>%
+  group_by(Rcode, Mcode, Fcode) %>%
+  summarise(response_rate = mean(Florence), num_customers = n(), .groups = 'drop') %>%
+  mutate(above_average = response_rate > overall_response_rate)
+
+
+# Filter above-average RFM combinations
+above_avg <- rfm_rates %>% filter(above_average)
+print(above_avg) #Combinations that have above average response rates.
+```
+
+2. Suppose that we decide to send promotional mail only to the “above-average” RFM combinations identified in part 1. Compute the response rate in the validation data using these combinations.
+```{r}
+valid_above_avg <- valid %>%
+  inner_join(above_avg, by = c("Rcode", "Mcode", "Fcode"))
+
+validation_response_rate <- mean(valid_above_avg$Florence)
+
+nrow(valid_above_avg) #446 customers targeted in validation set
+sum(valid_above_avg$Florence) #46 buyers identified in targeted validation set 
+print(validation_response_rate) #10.314% response rate in validation set
+
+#We see a slight increase in buying, when original overall response rate was 8.71% and targeted resposne rate becomes 10.31%.
+```
+
+
+3. Rework parts 1 and 2 with three segments:
+
+Segment 1: RFM combinations that have response rates that exceed twice the overall response rate
+Segment 2: RFM combinations that exceed the overall response rate but do not exceed twice that rate
+Segment 3: the remaining RFM combinations
+Draw the lift curve (consisting of three points for these three segments) showing the number of customers in the validation dataset on the x-axis and cumulative number of buyers in the validation dataset on the y-axis.
+
+```{r}
+# Segment assignment
+twice_overall <- 2 * overall_response_rate
+
+
+#Segmenting sections 
+rfm_rates2 <- rfm_rates %>%
+  mutate(segment = case_when(
+    response_rate > twice_overall ~ "Segment 1",
+    response_rate > overall_response_rate ~ "Segment 2",
+    TRUE ~ "Segment 3"
+  ))
+
+
+# Merge segment info
+valid_segments <- valid %>%
+  left_join(rfm_rates2[, c("Rcode", "Mcode", "Fcode", "segment")], by = c("Rcode", "Mcode", "Fcode"))
+
+# Segment lift data
+segment_summary <- valid_segments %>%
+  group_by(segment) %>%
+  summarise(customers = n(), buyers = sum(Florence), .groups = 'drop')
+
+
+# Lift Chart
+segment_summary$segment <- factor(segment_summary$segment, 
+                                  levels = c("Segment 1", "Segment 2", "Segment 3"))
+
+segment_summary <- segment_summary %>%
+  arrange(segment) %>%
+  mutate(cum_customers = cumsum(customers),
+         cum_buyers = cumsum(buyers))
+
+plot(segment_summary$cum_customers, segment_summary$cum_buyers,
+     type = "b",
+     xlab = "Cumulative Number of Customers",
+     ylab = "Cumulative Number of Buyers",
+     main = "Lift Curve")
+abline(a = 0, 
+       b = max(segment_summary$cum_buyers) / max(segment_summary$cum_customers), 
+       lty = 2,  # dashed line
+       col = "red")
+
+
+#Segment 2 are more likely to respond (recent buyers are more valuable than big/medium spenders). 
+```
+
+
+-Nearest Neighbors
+The k-nearest-neighbors technique can be used to create segments based on product proximity to similar products of the products offered as well as the propensity to purchase (as measured by the RFM variables). For The Art History of Florence, a possible segmentation by product proximity could be created using the following variables:
+
+R: recency—months since last purchase
+F: frequency—total number of past purchases
+M: monetary—total money (in dollars) spent on books
+FirstPurch: months since first purchase
+RelatedPurch: total number of past purchases of related books (i.e., sum of purchases from the art and geography categories and of titles Secrets of Italian Cooking, Historical Atlas of Italy, and Italian Art)
+
+4. Use the k-nearest-neighbor approach to classify cases with k = 1, 2, ..., 11, using Florence as the outcome variable. Based on the validation set, find the best k. Remember to normalize all five variables. Create a lift curve for the best k model, and V
+
+```{r}
+# Normalize features for k-NN
+features <- scale(train[, c("R", "F", "M", "FirstPurch", "Related.Purchase")])
+features_valid <- scale(valid[, c("R", "F", "M", "FirstPurch", "Related.Purchase")], center = attr(features, "scaled:center"), scale = attr(features, "scaled:scale"))
+
+# Find best k
+best_acc <- 0
+best_k <- 1
+for (k in 1:11) {
+  pred <- knn(train = features, test = features_valid, cl = train$Florence, k = k)
+  acc <- mean(pred == valid$Florence)
+  if (acc > best_acc) {
+    best_acc <- acc
+    best_k <- k
+  }
+}
+
+# k=8 is the best model
+# Validation Accuracy: 91.9%
+
+
+# Final k-NN model
+pred_prob <- attr(knn(train = features, test = features_valid, cl = train$Florence, k = best_k, prob = TRUE), "prob")
+
+
+# Lift curve plot
+lift_df <- data.frame(prob = pred_prob, actual = valid$Florence)
+lift_df <- lift_df %>% arrange(desc(prob))
+lift_df$cumulative_buyers <- cumsum(lift_df$actual)
+lift_df$customer_number <- 1:nrow(lift_df)
+
+ggplot(lift_df, aes(x = customer_number, y = cumulative_buyers)) +
+  geom_line() +
+  labs(title = "Lift Curve for Best k-NN Model", x = "Cumulative Customers", y = "Cumulative Buyers") +
+  theme_minimal()
+
+ggplot(lift_df, aes(x = customer_number, y = cumulative_buyers)) +
+  geom_line() +
+  geom_abline(
+    slope = max(lift_df$cumulative_buyers) / max(lift_df$customer_number),
+    intercept = 0,
+    linetype = "dashed",
+    color = "red"
+  ) +
+  labs(
+    title = "Lift Curve for Best k-NN Model",
+    x = "Cumulative Customers",
+    y = "Cumulative Buyers"
+  ) +
+  theme_minimal()
+
+#Predictive model is not much different from that of a randomized method. This is not very good.
+
+```
+
+
+5. The k-NN prediction algorithm gives a numerical value, which is a weighted average of the values of the Florence variable for the k-nearest neighbors with weights that are inversely proportional to distance. Using the best k that you calculated above with k-NN classification, now run a model with k-NN prediction and compute a lift curve for the validation data. Use all 5 predictors and normalized data. What is the range within which a prediction will fall? How does this result compare to the output you get with the k-nearest-neighbor classification?
+```{r}
+
+library(FNN)
+
+# Run k-NN prediction
+knn_pred <- knn.reg(train = features, test = features_valid, 
+                    y = train$Florence, k = best_k)
+
+pred_values <- knn_pred$pred
+
+# Create lift curve 
+lift_df_reg <- data.frame(pred = pred_values, actual = valid$Florence)
+lift_df_reg <- lift_df_reg %>% arrange(desc(pred))
+lift_df_reg$cumulative_buyers <- cumsum(lift_df_reg$actual)
+lift_df_reg$customer_number <- 1:nrow(lift_df_reg)
+
+# Plot
+ggplot(lift_df_reg, aes(x = customer_number, y = cumulative_buyers)) +
+  geom_line() +
+  labs(title = "Lift Curve for k-NN Prediction", 
+       x = "Cumulative Customers", 
+       y = "Cumulative Buyers") +
+  theme_minimal()
+
+
+ggplot(lift_df_reg, aes(x = customer_number, y = cumulative_buyers)) +
+  geom_line() +
+  geom_abline(
+    slope = max(lift_df_reg$cumulative_buyers) / max(lift_df_reg$customer_number),
+    intercept = 0,
+    linetype = "dashed",
+    color = "red"
+  ) +
+  labs(
+    title = "Lift Curve for k-NN Prediction",
+    x = "Cumulative Customers",
+    y = "Cumulative Buyers"
+  ) +
+  theme_minimal()
+
+
+#Incorporating all factors, we get a better predictive model. 
+#Using 8 most similar purchases made by other consumers, we get a better predictive model to understand if a customer will purchase Florence.
+
+
+```
+
+Logistic Regression
+The logistic regression model offers a powerful method for modeling response because it yields well-defined purchase probabilities. The model is especially attractive in consumer-choice settings because it can be derived from the random utility theory of consumer behavior.
+
+Use the training set data of 1800 records to construct three logistic regression models with Florence as the outcome variable and each of the following sets of predictors:
+
+The full set of 15 predictors in the dataset
+A subset of predictors that you judge to be the best
+Only the R, F, and M variables
+```{r}
+#Full set of 15 predictors
+model_full <- glm(
+  Florence ~ Gender + M + R + F + FirstPurch + 
+    ChildBks + YouthBks + CookBks + DoItYBks + RefBks + 
+    ArtBks + GeogBks + ItalCook + ItalAtlas + ItalArt,
+  data = train,
+  family = "binomial"
+)
+summary(model_full)
+
+#Subset of predictors
+#Using gender, F, Cookbks, Artbks, and geogbks. significant p-value
+model_best <- glm(
+  Florence ~ Gender + F + CookBks +  ArtBks + GeogBks,
+  data = train,
+  family = "binomial"
+)
+summary(model_best)
+
+
+#RFM only
+model_rfm <- glm(Florence ~ R + F + M, data = train, family = "binomial")
+summary(model_rfm)
+
+
+# Frequency is consistently a significant value, across all three of these logistic regressions.  
+# Frequency refers to the number of times a customer has made a purchase within a specific time frame. 
+# Frequency and Artbks are highly significant and positive variables in determining if Florence is purchased. 
+```
+
+
+6. Create a lift chart summarizing the results from the three logistic regression models created above, along with the expected lift for a random selection of an equal number of customers from the validation dataset.
+```{r}
+pred_full <- predict(model_full, newdata = valid, type="response")
+pred_best <- predict(model_best, newdata = valid, type="response")
+pred_rfm <- predict(model_rfm, newdata = valid, type="response")
+
+library(gains)
+
+actual <- valid$Florence
+
+gain_full <- gains(actual, pred_full, groups = 10)
+gain_best <- gains(actual, pred_best, groups = 10)
+gain_rfm  <- gains(actual, pred_rfm, groups = 10)
+
+#Plot the lift chart
+plot(c(0, sum(gain_full$depth) / sum(gain_full$depth)),
+     c(0, sum(gain_full$cume.pct.of.total) / 100),
+     xlab = "Proportion of Validation Set", ylab = "Proportion of Customer", main = "Lift chart for 3 logistic regression models", type="l")
+
+lines(c(0, sum(gain_full$depth) / sum(gain_full$depth)),
+      c(0, sum(gain_full$cume.pct.of.total) / 100),
+      col = "red", lwd=1)
+
+lines(c(0, sum(gain_best$depth) / sum(gain_best$depth)),
+      c(0, sum(gain_best$cume.pct.of.total) / 100),
+      col = "blue", lwd=1)
+
+lines(c(0, sum(gain_rfm$depth) / sum(gain_rfm$depth)),
+      c(0, sum(gain_rfm$cume.pct.of.total) / 100),
+      col = "green", lwd=1)
+
+legend("bottomright", legend = c("Full", "Best", "RFM"),
+       col = c("red", "blue", "green"), lty = c(1,1,1), lwd = 2)
+
+# Of the three logistic regressions, full represents the most accurate model. (Uses all variables)
+```
+
+7. If the cutoff criterion for a campaign is a 30% likelihood of a purchase, find the customers in the validation data that would be targeted and count the number of buyers in this set.
+
+
+```{r}
+targeted <- valid[pred_best >= 0.3,]
+
+num_targeted <- nrow(targeted)
+num_responders <- sum(targeted$Florence)
+
+#Customers targeted: 12
+#Actual buyers: 4
+```
+
+8. Using the Neural Net
+```{r}
+
+library(neuralnet)
+library(caret)
+
+#normalize the train dataset
+train.norm <- train
+book.norm <- preProcess(train.norm[,4:6], method="range")
+train.norm[,4:6] <- predict(book.norm, train.norm[,4:6])
+
+#Apply neural net based on the inputs of M + R + F
+book.nn <- neuralnet(Yes_Florence + No_Florence ~ M + R + F, data = train.norm, linear.output = F, hidden = 2) 
+invisible(prediction(book.nn))
+
+plot(book.nn, rep="best")
+
+# Frequency has the strongest correlation to being a yes purchase on Florence. 
+
+
+```
+
+
+
